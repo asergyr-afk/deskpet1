@@ -1,0 +1,521 @@
+name: Build DeskPet
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate project
+        run: |
+          mkdir -p deskpet/app/src/main/java/com/example/deskpet deskpet/app/src/main/res/drawable-nodpi
+          cp sprites.png deskpet/app/src/main/res/drawable-nodpi/sprites.png
+          cat > deskpet/settings.gradle.kts << 'EOF_PET'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DeskPet"
+          include(":app")
+          EOF_PET
+          cat > deskpet/build.gradle.kts << 'EOF_PET'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_PET
+          cat > deskpet/gradle.properties << 'EOF_PET'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          EOF_PET
+          cat > deskpet/app/build.gradle.kts << 'EOF_PET'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.deskpet"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.deskpet"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_PET
+          cat > deskpet/app/src/main/AndroidManifest.xml << 'EOF_PET'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:label="桌寵"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".PetService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="desktop pet overlay" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_PET
+          cat > deskpet/app/src/main/java/com/example/deskpet/MainActivity.kt << 'EOF_PET'
+          package com.example.deskpet
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.gravity = Gravity.CENTER
+                  root.setPadding(48, 48, 48, 48)
+
+                  val tip = TextView(this)
+                  tip.text = "桌寵\n\n第一次使用，請先在設定頁允許「顯示在其他應用程式上層」，回來後再按一次啟動。\n\n戳她、拖她、長按她，看看會發生什麼事。"
+                  tip.textSize = 16f
+                  tip.gravity = Gravity.CENTER
+
+                  val start = Button(this)
+                  start.text = "啟動桌寵"
+                  start.setOnClickListener { startPet() }
+
+                  val stop = Button(this)
+                  stop.text = "關閉桌寵"
+                  stop.setOnClickListener { stopService(Intent(this, PetService::class.java)) }
+
+                  root.addView(tip)
+                  root.addView(start)
+                  root.addView(stop)
+                  setContentView(root)
+              }
+
+              private fun startPet() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      val intent = Intent(
+                          Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:" + packageName)
+                      )
+                      startActivity(intent)
+                      return
+                  }
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+                  startForegroundService(Intent(this, PetService::class.java))
+              }
+          }
+          EOF_PET
+          cat > deskpet/app/src/main/java/com/example/deskpet/PetService.kt << 'EOF_PET'
+          package com.example.deskpet
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.BitmapFactory
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.IBinder
+          import android.view.Gravity
+          import android.view.WindowManager
+
+          class PetService : Service() {
+
+              private var windowManager: WindowManager? = null
+              private var petView: PetView? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+              override fun onCreate() {
+                  super.onCreate()
+                  startAsForeground()
+                  addPet()
+              }
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel("pet", "桌寵", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  val notification = Notification.Builder(this, "pet")
+                      .setSmallIcon(android.R.drawable.btn_star_big_on)
+                      .setContentTitle("桌寵陪伴中")
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(1, notification)
+                  }
+              }
+
+              private fun addPet() {
+                  if (petView != null) return
+                  val manager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  val dm = resources.displayMetrics
+
+                  val opts = BitmapFactory.Options()
+                  opts.inScaled = false
+                  val atlas = BitmapFactory.decodeResource(resources, R.drawable.sprites, opts)
+
+                  val h = (170 * dm.density).toInt()
+                  val w = (h * 340f / 400f).toInt()
+                  val lp = WindowManager.LayoutParams(
+                      w,
+                      h,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = (dm.widthPixels * 0.3f).toInt()
+                  lp.y = (dm.heightPixels * 0.62f).toInt()
+
+                  val view = PetView(this, atlas, manager, lp)
+                  try {
+                      manager.addView(view, lp)
+                      windowManager = manager
+                      petView = view
+                  } catch (e: Exception) {
+                      stopSelf()
+                  }
+              }
+
+              override fun onDestroy() {
+                  val v = petView
+                  if (v != null) {
+                      try {
+                          windowManager?.removeView(v)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  petView = null
+                  super.onDestroy()
+              }
+          }
+          EOF_PET
+          cat > deskpet/app/src/main/java/com/example/deskpet/PetView.kt << 'EOF_PET'
+          package com.example.deskpet
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.Rect
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewConfiguration
+          import android.view.WindowManager
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.sin
+          import kotlin.random.Random
+
+          enum class Pose(val col: Int, val row: Int) {
+              STAND(0, 0), READ(1, 0), TEA(2, 0), SLEEP(3, 0),
+              SURPRISED(0, 1), ANGRY(1, 1), HAPPY(2, 1), WAVE(3, 1),
+              JUMP(0, 2), SWORD(1, 2), CLOCK(2, 2), LOVE(3, 2)
+          }
+
+          class PetView(
+              ctx: Context,
+              private val atlas: Bitmap,
+              private val wm: WindowManager,
+              private val lp: WindowManager.LayoutParams
+          ) : View(ctx) {
+
+              private val cellW = 340
+              private val cellH = 400
+              private val density = ctx.resources.displayMetrics.density
+              private val ui = Handler(Looper.getMainLooper())
+              private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+              private val srcRect = Rect()
+              private val dstRect = Rect()
+              private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
+
+              private var pose = Pose.STAND
+              private var walking = false
+              private var dir = 1
+              private var holdUntil = 0L
+              private var nextDecision = 0L
+
+              private var dragging = false
+              private var moved = false
+              private var longPressFired = false
+              private var downX = 0f
+              private var downY = 0f
+              private var startX = 0
+              private var startY = 0
+
+              private var pokeCount = 0
+              private var lastPoke = 0L
+
+              private val tickRunnable = object : Runnable {
+                  override fun run() {
+                      tick()
+                      ui.postDelayed(this, 40)
+                  }
+              }
+
+              private val longPressRunnable = Runnable {
+                  longPressFired = true
+                  showTime()
+              }
+
+              override fun onAttachedToWindow() {
+                  super.onAttachedToWindow()
+                  nextDecision = SystemClock.uptimeMillis() + 1500
+                  ui.post(tickRunnable)
+              }
+
+              override fun onDetachedFromWindow() {
+                  ui.removeCallbacksAndMessages(null)
+                  super.onDetachedFromWindow()
+              }
+
+              private fun screenW(): Int = resources.displayMetrics.widthPixels
+              private fun screenH(): Int = resources.displayMetrics.heightPixels
+
+              private fun pushLayout() {
+                  lp.x = lp.x.coerceIn(0, max(0, screenW() - lp.width))
+                  lp.y = lp.y.coerceIn(0, max(0, screenH() - lp.height))
+                  try {
+                      wm.updateViewLayout(this, lp)
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun tick() {
+                  val now = SystemClock.uptimeMillis()
+                  if (dragging) {
+                      pose = Pose.JUMP
+                  } else {
+                      if (now >= holdUntil && now >= nextDecision) {
+                          decide(now)
+                      }
+                      if (walking) {
+                          lp.x += (dir * 1.6f * density).toInt()
+                          if (lp.x <= 0) {
+                              dir = 1
+                          }
+                          if (lp.x >= screenW() - lp.width) {
+                              dir = -1
+                          }
+                          pushLayout()
+                      }
+                  }
+                  invalidate()
+              }
+
+              private fun decide(now: Long) {
+                  walking = false
+                  val r = Random.nextInt(100)
+                  if (r < 40) {
+                      pose = Pose.STAND
+                      walking = true
+                      dir = if (Random.nextBoolean()) 1 else -1
+                      nextDecision = now + Random.nextLong(3000, 8000)
+                  } else if (r < 55) {
+                      pose = Pose.READ
+                      nextDecision = now + Random.nextLong(6000, 12000)
+                  } else if (r < 70) {
+                      pose = Pose.TEA
+                      nextDecision = now + Random.nextLong(6000, 12000)
+                  } else if (r < 80) {
+                      pose = Pose.WAVE
+                      nextDecision = now + Random.nextLong(3000, 5000)
+                  } else if (r < 90) {
+                      pose = Pose.SLEEP
+                      nextDecision = now + Random.nextLong(15000, 40000)
+                  } else {
+                      pose = Pose.STAND
+                      nextDecision = now + Random.nextLong(2000, 4000)
+                  }
+              }
+
+              private fun react(p: Pose, ms: Long) {
+                  val now = SystemClock.uptimeMillis()
+                  walking = false
+                  pose = p
+                  holdUntil = now + ms
+                  nextDecision = holdUntil + 500
+              }
+
+              private fun poke() {
+                  val now = SystemClock.uptimeMillis()
+                  pokeCount = if (now - lastPoke > 3000) 1 else pokeCount + 1
+                  lastPoke = now
+                  if (pokeCount == 1) {
+                      react(Pose.SURPRISED, 1200)
+                  } else if (pokeCount <= 3) {
+                      react(Pose.HAPPY, 1500)
+                  } else if (pokeCount <= 5) {
+                      react(Pose.LOVE, 2000)
+                  } else if (pokeCount == 6) {
+                      react(Pose.ANGRY, 2000)
+                  } else {
+                      react(Pose.SWORD, 2200)
+                      pokeCount = 0
+                  }
+              }
+
+              private fun showTime() {
+                  val text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+                  Toast.makeText(context, "現在是 " + text, Toast.LENGTH_SHORT).show()
+                  react(Pose.CLOCK, 3000)
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          downX = e.rawX
+                          downY = e.rawY
+                          startX = lp.x
+                          startY = lp.y
+                          moved = false
+                          longPressFired = false
+                          ui.postDelayed(longPressRunnable, 600)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          val dx = e.rawX - downX
+                          val dy = e.rawY - downY
+                          if (!moved && (abs(dx) > slop || abs(dy) > slop)) {
+                              moved = true
+                              dragging = true
+                              walking = false
+                              ui.removeCallbacks(longPressRunnable)
+                          }
+                          if (moved) {
+                              lp.x = (startX + dx).toInt()
+                              lp.y = (startY + dy).toInt()
+                              pushLayout()
+                          }
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          ui.removeCallbacks(longPressRunnable)
+                          if (dragging) {
+                              dragging = false
+                              holdUntil = 0L
+                              nextDecision = SystemClock.uptimeMillis() + 800
+                          } else if (!longPressFired) {
+                              poke()
+                          }
+                      }
+                      MotionEvent.ACTION_CANCEL -> {
+                          ui.removeCallbacks(longPressRunnable)
+                          dragging = false
+                      }
+                  }
+                  return true
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  srcRect.set(pose.col * cellW, pose.row * cellH, (pose.col + 1) * cellW, (pose.row + 1) * cellH)
+                  dstRect.set(0, 0, width, height)
+
+                  var offsetY = 0f
+                  if (walking && pose == Pose.STAND) {
+                      offsetY = -abs(sin(SystemClock.uptimeMillis() / 110.0)).toFloat() * 6f * density
+                  }
+
+                  canvas.save()
+                  if (walking && dir < 0) {
+                      canvas.scale(-1f, 1f, width / 2f, height / 2f)
+                  }
+                  canvas.translate(0f, offsetY)
+                  canvas.drawBitmap(atlas, srcRect, dstRect, paint)
+                  canvas.restore()
+              }
+          }
+          EOF_PET
+
+      - name: Build debug APK
+        working-directory: deskpet
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskPet-APK
+          path: deskpet/app/build/outputs/apk/debug/app-debug.apk
