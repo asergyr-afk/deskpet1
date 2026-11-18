@@ -230,7 +230,7 @@ jobs:
                   opts.inScaled = false
                   val atlas = BitmapFactory.decodeResource(resources, R.drawable.sprites, opts)
 
-                  val h = (170 * dm.density).toInt()
+                  val h = (100 * dm.density).toInt()
                   val w = (h * 340f / 400f).toInt()
                   val lp = WindowManager.LayoutParams(
                       w,
